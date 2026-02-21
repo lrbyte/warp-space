@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Warp Speed (match do vídeo)</title>
+  <style>
+    html, body { margin:0; height:100%; background:#000; overflow:hidden; }
+    canvas { display:block; width:100%; height:100%; }
+
+    /* Controles discretos: só aparecem ao chegar o mouse perto do canto */
+    .ui-zone{
+      position: fixed;
+      left: 10px;
+      top: 10px;
+      width: 340px;
+      height: 240px;
+      z-index: 5;
+      pointer-events: none;
+    }
+    .gear {
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 34px;
+      height: 34px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,.16);
+      background: rgba(255,255,255,.06);
+      color: rgba(255,255,255,.85);
+      font: 16px/34px system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      text-align: center;
+      cursor: pointer;
+
+      opacity: 0;
+      transform: translateY(-4px);
+      transition: opacity .22s ease, transform .22s ease;
+      pointer-events: auto;
+      user-select: none;
+    }
+    .panel {
+      position: absolute;
+      left: 0;
+      top: 42px;
+      width: 315px;
+      background: rgba(0,0,0,.55);
+      border: 1px solid rgba(255,255,255,.12);
+      border-radius: 12px;
+      padding: 10px 12px;
+      color: rgba(255,255,255,.9);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      font-size: 12px;
+      backdrop-filter: blur(6px);
+
+      opacity: 0;
+      transform: translateY(-6px);
+      transition: opacity .22s ease, transform .22s ease;
+      pointer-events: auto;
+      user-select: none;
+    }
+    .row { display:flex; align-items:center; gap:8px; margin-top:8px; }
+    .row:first-child { margin-top:0; }
+    .btn {
+      border: 1px solid rgba(255,255,255,.18);
+      background: rgba(255,255,255,.08);
+      color: rgba(255,255,255,.92);
+      padding: 6px 10px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .btn:hover { background: rgba(255,255,255,.12); }
+    .btn:active { transform: translateY(1px); }
+    .label { opacity:.8; min-width: 86px; }
+    input[type="range"] { width: 178px; }
+    .value { opacity:.85; min-width: 52px; text-align:right; }
+
+    .ui-zone.reveal { pointer-events: auto; }
+    .ui-zone.reveal .gear,
+    .ui-zone.reveal .panel { opacity: 1; transform: translateY(0); }
+
+    .hint {
+      position: fixed; left: 12px; bottom: 12px;
+      color: rgba(255,255,255,.5);
+      font-family: system-ui, sans-serif;
+      font-size: 12px;
+      user-select: none;
+      z-index: 4;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+
+  <div class="ui-zone" id="uiZone">
+    <div class="gear" id="gear" title="Controles">⚙</div>
+
+    <div class="panel" id="panel">
+      <div class="row">
+        <button class="btn" id="minus">– Vel</button>
+        <button class="btn" id="plus">+ Vel</button>
+        <button class="btn" id="pause">Pausar</button>
+        <button class="btn" id="reset">Reset</button>
+      </div>
+
+      <div class="row">
+        <div class="label">Velocidade</div>
+        <input id="speedRange" type="range" min="0" max="0.20" step="0.001" />
+        <div class="value" id="speedVal"></div>
+      </div>
+
+      <div class="row">
+        <div class="label">Intensidade</div>
+        <input id="trailRange" type="range" min="0.10" max="0.60" step="0.01" />
+        <div class="value" id="trailVal"></div>
+      </div>
+
+      <div class="row">
+        <div class="label">Quantidade</div>
+        <input id="densRange" type="range" min="500" max="9000" step="100" />
+        <div class="value" id="densVal"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="hint">Passe o mouse no canto superior esquerdo • F11 tela cheia • Espaço pausa</div>
+
+  <script>
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d", { alpha: false });
+
+    function resize() {
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      canvas.width  = Math.floor(innerWidth  * dpr);
+      canvas.height = Math.floor(innerHeight * dpr);
+      canvas._dpr = dpr;
+    }
+    addEventListener("resize", resize);
+    resize();
+
+    // ======= VISUAL “igual ao vídeo” (monocromático) =======
+    // Velocidade base BAIXA, mas com movimento mínimo pra nunca “parar”
+    let speed = 0.040;             // ajuste inicial (mais parecido com o vídeo)
+    const minSpeed = 0.010;        // NUNCA fica 0 (mesmo com slider no mínimo)
+
+    // “Rastro” (quanto maior, menos rastro acumulado). No vídeo é moderado.
+    let trail = 0.32;
+
+    // Geometria do túnel: centro quase fixo, sem nebula
+    const zMax = 2200;
+    const fov = 320;
+    const centerJitter = 0.00;     // vídeo parece bem estável
+
+    // Populações: streaks grandes + muitos pontinhos no centro
+    let density = 3600;            // total base
+    const bigRatio = 0.18;         // porcento de streaks grandes (mais “linhas longas”)
+    const centerDotRatio = 0.35;   // pontinhos pequenos (miolo)
+    // =======================================================
+
+    // UI
+    const uiZone = document.getElementById("uiZone");
+    const gear = document.getElementById("gear");
+
+    const speedRange = document.getElementById("speedRange");
+    const densRange  = document.getElementById("densRange");
+    const trailRange = document.getElementById("trailRange");
+
+    const speedVal = document.getElementById("speedVal");
+    const densVal  = document.getElementById("densVal");
+    const trailVal = document.getElementById("trailVal");
+
+    const btnMinus = document.getElementById("minus");
+    const btnPlus  = document.getElementById("plus");
+    const btnPause = document.getElementById("pause");
+    const btnReset = document.getElementById("reset");
+
+    function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+    let paused = false;
+    function syncUI(){
+      speedRange.value = String(speed);
+      densRange.value  = String(density);
+      trailRange.value = String(trail);
+
+      speedVal.textContent = speed.toFixed(3);
+      densVal.textContent  = String(density);
+      trailVal.textContent = trail.toFixed(2);
+
+      btnPause.textContent = paused ? "Continuar" : "Pausar";
+    }
+
+    // ---- UI “some sozinho” (hover/proximidade do mouse) ----
+    let pinnedOpen = false;
+    let hideTimer = null;
+    function showUI(){
+      uiZone.classList.add("reveal");
+      if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+    }
+    function scheduleHide(){
+      if (pinnedOpen) return;
+      if (hideTimer) clearTimeout(hideTimer);
+      hideTimer = setTimeout(() => uiZone.classList.remove("reveal"), 450);
+    }
+
+    // Mostra quando o mouse chega perto do canto (proximidade)
+    addEventListener("mousemove", (e) => {
+      const near = (e.clientX < 90 && e.clientY < 90);
+      if (near) showUI();
+      else scheduleHide();
+    });
+
+    // Clique no ⚙ trava aberto/fechado
+    gear.addEventListener("click", () => {
+      pinnedOpen = !pinnedOpen;
+      if (pinnedOpen) showUI();
+      else scheduleHide();
+    });
+
+    // Botões/sliders
+    btnMinus.onclick = () => { speed = clamp(speed - 0.005, 0, 0.20); syncUI(); };
+    btnPlus.onclick  = () => { speed = clamp(speed + 0.005, 0, 0.20); syncUI(); };
+    btnPause.onclick = () => { paused = !paused; syncUI(); };
+    btnReset.onclick = () => { resetAll(); };
+
+    speedRange.oninput = (e) => { speed = Number(e.target.value); syncUI(); };
+    trailRange.oninput = (e) => { trail = Number(e.target.value); syncUI(); };
+    densRange.oninput  = (e) => { density = Number(e.target.value); resetAll(); syncUI(); };
+
+    addEventListener("keydown", (e) => {
+      if (e.code === "Space") { paused = !paused; syncUI(); }
+    });
+
+    // ---------- Stars ----------
+    // 3 “tipos” para ficar igual ao vídeo:
+    // - big: streaks longos e brilhantes
+    // - normal: streaks médios
+    // - centerDot: pontinhos pequenos concentrados no centro (mas se movem!)
+    let stars = [];
+
+    function randSigned(){ return (Math.random()*2 - 1); }
+
+    function newStar(type, randomZ=false){
+      let x, y;
+
+      if (type === "centerDot"){
+        // concentra mais perto do centro (gauss-like simples)
+        const r = Math.pow(Math.random(), 2.4); // mais peso no centro
+        const ang = Math.random() * Math.PI * 2;
+        const spread = Math.min(innerWidth, innerHeight) * 0.45;
+        x = Math.cos(ang) * spread * r;
+        y = Math.sin(ang) * spread * r;
+      } else {
+        x = randSigned() * innerWidth;
+        y = randSigned() * innerHeight;
+      }
+
+      const z = randomZ ? Math.random() * zMax : zMax;
+
+      // brilho base por tipo (no vídeo, tudo é branco/cinza)
+      const base = (type === "big") ? (0.45 + Math.random()*0.55)
+                 : (type === "centerDot") ? (0.10 + Math.random()*0.25)
+                 : (0.20 + Math.random()*0.40);
+
+      // “peso” do movimento (big estica mais)
+      const mult = (type === "big") ? (1.25 + Math.random()*0.25)
+                 : (type === "centerDot") ? (0.55 + Math.random()*0.20)
+                 : (0.90 + Math.random()*0.25);
+
+      return { x, y, z, type, base, mult };
+    }
+
+    function resetAll(){
+      const bigN = Math.floor(density * bigRatio);
+      const centerN = Math.floor(density * centerDotRatio);
+      const normalN = Math.max(0, density - bigN - centerN);
+
+      stars = [];
+      for (let i=0;i<bigN;i++) stars.push(newStar("big", true));
+      for (let i=0;i<centerN;i++) stars.push(newStar("centerDot", true));
+      for (let i=0;i<normalN;i++) stars.push(newStar("normal", true));
+    }
+    resetAll();
+
+    // ---------- Vignette (cantos escuros como no vídeo) ----------
+    function drawVignette(dpr){
+      const w = canvas.width, h = canvas.height;
+      const cx = w/2, cy = h/2;
+      const r = Math.max(w,h) * 0.72;
+
+      const g = ctx.createRadialGradient(cx, cy, r*0.10, cx, cy, r);
+      g.addColorStop(0.0, "rgba(0,0,0,0)");
+      g.addColorStop(0.55, "rgba(0,0,0,0.15)");
+      g.addColorStop(1.0, "rgba(0,0,0,0.55)");
+
+      ctx.fillStyle = g;
+      ctx.fillRect(0,0,w,h);
+    }
+
+    let t = 0;
+
+    function frame(){
+      const dpr = canvas._dpr || 1;
+      const w = canvas.width, h = canvas.height;
+
+      // Fundo com “persistência” (rastro)
+      // (trail mais alto = apaga mais por frame)
+      ctx.fillStyle = `rgba(0,0,0,${trail})`;
+      ctx.fillRect(0, 0, w, h);
+
+      // Centro (bem estável)
+      if (!paused) t += 0.012;
+
+      const cx = (innerWidth * 0.5 + Math.sin(t * 0.7) * 20 * centerJitter) * dpr;
+      const cy = (innerHeight * 0.5 + Math.cos(t * 0.9) * 20 * centerJitter) * dpr;
+
+      // velocidade real (sempre tem minSpeed)
+      const v = (minSpeed + speed);
+
+      for (let i = 0; i < stars.length; i++){
+        const s = stars[i];
+
+        const z1 = s.z;
+        const step = zMax * v * s.mult;
+
+        const z2 = z1 - step;
+
+        const k1 = fov / z1;
+        const k2 = fov / Math.max(1, z2);
+
+        const x1 = cx + s.x * k1 * dpr;
+        const y1 = cy + s.y * k1 * dpr;
+
+        const x2 = cx + s.x * k2 * dpr;
+        const y2 = cy + s.y * k2 * dpr;
+
+        // alpha cresce ao aproximar da câmera
+        const depth = clamp(1 - (z1 / zMax), 0, 1);
+
+        // “centerDot” vira traço curto, “big” vira traço longo e brilhante
+        let a = s.base * (0.35 + depth * 0.90);
+        a = clamp(a, 0.05, 1.0);
+
+        // largura: vídeo tem linhas finas, algumas mais grossas
+        let lw;
+        if (s.type === "big") lw = (0.8 + depth * 2.4) * dpr;
+        else if (s.type === "centerDot") lw = (0.35 + depth * 0.9) * dpr;
+        else lw = (0.55 + depth * 1.5) * dpr;
+
+        ctx.strokeStyle = `rgba(255,255,255,${a})`;
+        ctx.lineWidth = lw;
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+
+        // avança
+        if (!paused) s.z = z2;
+        else s.z = z1;
+
+        // respawn
+        if (s.z < 1){
+          stars[i] = newStar(s.type, false);
+        }
+      }
+
+      // vignette por cima
+      drawVignette(dpr);
+
+      requestAnimationFrame(frame);
+    }
+
+    // primeira pintura
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+
+    syncUI();
+    frame();
+  </script>
+</body>
+</html>

@@ -1,2 +1,2 @@
 # warp-space
-Uma animação de campo estelar em hiperespaço / velocidade de dobra em tempo real, desenvolvida com JavaScript puro e HTML5 Canvas. Suave, leve e totalmente personalizável.
+A real-time hyperspace / warp speed starfield animation built with vanilla JavaScript and HTML5 Canvas. Smooth, lightweight, and fully customizable.
